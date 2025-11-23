@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -69,11 +68,10 @@ if df is None:
     st.stop()
 
 # ----------------- 전처리 -----------------
-# 컬럼 이름 표준화
 df = df.rename(columns={c: c.strip().lower() for c in df.columns})
 required_cols = {"country", "blood_type"}
 if not required_cols.issubset(set(df.columns)):
-    st.error("CSV에 최소한 'country'와 'blood_type' 컬럼이 있어야 합니다. (대소문자 무관)")
+    st.error("CSV에 최소한 'country'와 'blood_type' 컬럼이 있어야 합니다.")
     st.stop()
 
 df["country"] = df["country"].astype(str).str.strip()
@@ -89,7 +87,7 @@ def compute_counts(df):
     total = counts.groupby("country", as_index=False)["count"].sum().rename(columns={"count":"total_count"})
     counts = counts.merge(total, on="country")
     counts["pct"] = counts["count"] / counts["total_count"] * 100
-    # 우세 혈액형
+
     idx = counts.groupby("country")["count"].idxmax()
     dominant = counts.loc[idx].reset_index(drop=True)
     dominant = dominant.rename(columns={
@@ -101,23 +99,21 @@ def compute_counts(df):
 
 counts_df, dominant_df = compute_counts(df)
 
-# ----------------- 사이드바: 그래프 옵션 -----------------
+# ----------------- 그래프 옵션 -----------------
 st.sidebar.header("그래프 옵션")
-top_n = st.sidebar.slider("상위 국가 수 (Top N)", min_value=3, max_value=100, value=15, step=1)
+top_n = st.sidebar.slider("상위 국가 수 (Top N)", min_value=3, max_value=100, value=15)
 metric = st.sidebar.selectbox("막대그래프 기준", ["dominant_count", "dominant_pct"])
-stacked_view = st.sidebar.checkbox("누적(스택) 보기: 상위 N개 국가의 모든 혈액형 비율", value=True)
+stacked_view = st.sidebar.checkbox("누적(스택) 보기", value=True)
 
-# ----------------- 상위 N 국가 막대그래프 (수평) -----------------
+# ----------------- 상위 국가 막대그래프 -----------------
 st.subheader("📊 상위 국가 — 우세 혈액형 (수평 막대)")
 
-# 안전: metric이 문자열이라 direct column ok
 if metric == "dominant_count":
-    top_df = dominant_df.nlargest(top_n, "dominant_count").copy()
+    top_df = dominant_df.nlargest(top_n, "dominant_count")
 else:
-    top_df = dominant_df.nlargest(top_n, "dominant_pct").copy()
+    top_df = dominant_df.nlargest(top_n, "dominant_pct")
 
-# 정렬(내림차순)
-top_df = top_df.sort_values(by=metric, ascending=True)  # for horizontal bar: small->left, big->right
+top_df = top_df.sort_values(by=metric, ascending=True)
 
 fig_bar = px.bar(
     top_df,
@@ -125,67 +121,38 @@ fig_bar = px.bar(
     y="country",
     orientation="h",
     color="dominant_blood_type",
-    labels={metric: ("우세 혈액형 수" if metric=="dominant_count" else "우세 혈액형 비율(%)"), "country":"국가"},
-    hover_data=["dominant_count","dominant_pct","total_count"]
+    labels={
+        "dominant_count": "우세 혈액형 수",
+        "dominant_pct": "우세 비율(%)",
+        "country": "국가"
+    },
+    hover_data=["dominant_count", "dominant_pct", "total_count"]
 )
 fig_bar.update_layout(yaxis=dict(tickfont=dict(size=11)))
 st.plotly_chart(fig_bar, use_container_width=True)
 
-# ----------------- 누적 스택 막대 (모든 혈액형 비율) -----------------
+# ----------------- 누적 스택 -----------------
 if stacked_view:
     st.subheader(f"🔢 상위 {top_n}개 국가의 혈액형 비율 (누적 스택, %)")
-    # pivot percentages
-    pivot = counts_df.pivot_table(index="country", columns="blood_type", values="pct", fill_value=0)
-    # choose countries to show: same top countries by dominant_count to keep meaning
-    countries_for_stack = dominant_df.nlargest(top_n, "dominant_count")["country"].tolist()
-    stack_df = pivot.loc[pivot.index.intersection(countries_for_stack)].reset_index()
-    # preserve order: sort by dominant_count desc
-    order = dominant_df.nlargest(top_n, "dominant_count")["country"].tolist()
-    stack_df["country"] = pd.Categorical(stack_df["country"], categories=order, ordered=True)
-    stack_df = stack_df.sort_values("country", ascending=False)  # so top is top of page
+
+    pivot = counts_df.pivot_table(
+        index="country",
+        columns="blood_type",
+        values="pct",
+        fill_value=0
+    ).reset_index()
+
+    use_countries = dominant_df.nlargest(top_n, "dominant_count")["country"].tolist()
+    pivot = pivot[pivot["country"].isin(use_countries)]
 
     fig_stack = px.bar(
-        stack_df,
+        pivot,
         x="country",
-        y=[c for c in stack_df.columns if c != "country"],
-        title="누적 비율(%)",
-        labels={"value":"비율(%)", "country":"국가"},
+        y=[c for c in pivot.columns if c not in ["country"]],
+        title="혈액형 비율 (누적)",
+        labels={"value": "비율(%)"}
     )
     fig_stack.update_layout(xaxis_tickangle=-45)
     st.plotly_chart(fig_stack, use_container_width=True)
 
-# ----------------- 특정 국가 상세 (파이 + 표) -----------------
-st.subheader("🔎 특정 국가의 혈액형 분포")
-countries_sorted = sorted(counts_df["country"].unique())
-selected_country = st.selectbox("국가 선택", countries_sorted, index=0)
-
-detail = counts_df[counts_df["country"] == selected_country].copy()
-if detail.empty:
-    st.warning("선택한 국가의 데이터가 없습니다.")
-else:
-    # 표
-    st.markdown(f"**{selected_country}**의 혈액형 분포 (카운트 및 비율)")
-    detail_table = detail[["blood_type","count","pct"]].sort_values("count", ascending=False).reset_index(drop=True)
-    detail_table["pct"] = detail_table["pct"].map(lambda x: f"{x:.1f}%")
-    st.table(detail_table)
-
-    # 파이차트
-    fig_pie = px.pie(detail, names="blood_type", values="count", title=f"{selected_country} - 혈액형 비율 (count)")
-    st.plotly_chart(fig_pie, use_container_width=True)
-
-# ----------------- 전체 우세 혈액형 테이블 및 다운로드 -----------------
-st.subheader("📋 모든 국가의 우세 혈액형 (정렬)")
-dominant_display = dominant_df[["country","dominant_blood_type","dominant_count","dominant_pct","total_count"]].copy()
-dominant_display = dominant_display.rename(columns={
-    "dominant_blood_type":"우세 혈액형",
-    "dominant_count":"우세 혈액형 수",
-    "dominant_pct":"우세 비율(%)",
-    "total_count":"총표본수"
-})
-dominant_display["우세 비율(%)"] = dominant_display["우세 비율(%)"].map(lambda x: f"{x:.1f}%")
-st.dataframe(dominant_display.reset_index(drop=True))
-
-csv_bytes = dominant_df.to_csv(index=False).encode("utf-8")
-st.download_button("우세 혈액형 결과 다운로드 (CSV)", csv_bytes, "dominant_blood_types.csv", "text/csv")
-
-st.success("완료 — 그래프나 색상, 정렬 방식 더 바꾸고 싶으면 말해줘!")
+# ----------------- 특정 국
