@@ -1,28 +1,16 @@
+# app.py
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import io
 
-st.set_page_config(page_title="나라별 우세 혈액형 분석", layout="wide")
+st.set_page_config(page_title="나라별 우세 혈액형 분석 (개선판)", layout="wide")
 
-st.title("🩸 나라별 가장 많은 혈액형 분석 대시보드")
+st.title("🩸 나라별 우세 혈액형 — 개선된 대시보드")
+st.markdown("샘플 데이터로 바로 시각화가 나타납니다. CSV 업로드 또는 GitHub RAW URL로 실제 데이터로 교체하세요.")
 
-st.markdown("""
-이 앱은 **나라별 우세 혈액형을 자동으로 계산하고 시각화**합니다.  
-CSV 업로드 전에도 샘플 데이터로 **바로 그래프를 볼 수 있습니다.**
-
-### ✨ 기능
-- CSV 파일 업로드 또는 GitHub RAW CSV URL 입력
-- 나라별 혈액형 개수 & 비율 자동 계산
-- 가장 많은 혈액형(우세 혈액형) 자동 탐색
-- 상위 N개 국가 막대그래프
-- 선택한 국가의 파이차트
-- 결과 다운로드 (CSV)
-""")
-
-# ---------------- 샘플 데이터 ----------------
-def load_sample_data():
-    csv = """country,blood_type
+# ----------------- 샘플 데이터 -----------------
+SAMPLE_CSV = """country,blood_type
 South Korea,A
 South Korea,A
 South Korea,O
@@ -38,107 +26,166 @@ India,B
 Brazil,O
 Brazil,O
 Brazil,A
+Germany,A
+Germany,A
+Germany,B
+France,O
+France,A
+France,A
 """
-    return pd.read_csv(io.StringIO(csv))
 
-# ---------------- 데이터 입력 ----------------
-st.sidebar.header("데이터 입력 방식")
+@st.cache_data
+def load_sample():
+    return pd.read_csv(io.StringIO(SAMPLE_CSV))
 
-choice = st.sidebar.radio("데이터 선택", ["샘플 데이터 사용", "파일 업로드", "GitHub RAW URL"])
+# ----------------- 입력 (사이드바) -----------------
+st.sidebar.header("데이터 입력")
+data_mode = st.sidebar.radio("데이터 소스", ["샘플 데이터 사용", "파일 업로드", "GitHub RAW URL"])
+
+@st.cache_data
+def read_csv_from_url(url: str):
+    return pd.read_csv(url)
 
 df = None
-
-if choice == "샘플 데이터 사용":
-    df = load_sample_data()
-
-elif choice == "파일 업로드":
+if data_mode == "샘플 데이터 사용":
+    df = load_sample()
+elif data_mode == "파일 업로드":
     uploaded = st.sidebar.file_uploader("CSV 파일 업로드", type=["csv"])
-    if uploaded:
-        df = pd.read_csv(uploaded)
-
-elif choice == "GitHub RAW URL":
+    if uploaded is not None:
+        try:
+            df = pd.read_csv(uploaded)
+        except Exception as e:
+            st.sidebar.error(f"파일 읽기 실패: {e}")
+elif data_mode == "GitHub RAW URL":
     url = st.sidebar.text_input("RAW CSV URL 입력")
     if url:
         try:
-            df = pd.read_csv(url)
-        except:
-            st.sidebar.error("CSV 파일을 불러올 수 없습니다. URL을 확인하세요.")
+            df = read_csv_from_url(url)
+        except Exception as e:
+            st.sidebar.error(f"URL에서 CSV 불러오기 실패: {e}")
 
-# ---------------- 데이터 없으면 안내 ----------------
 if df is None:
-    st.warning("📌 왼쪽에서 CSV를 업로드하거나 URL을 입력하거나 샘플 데이터를 선택하세요.")
+    st.warning("왼쪽에서 데이터 소스를 선택하세요. (샘플 사용 권장)")
     st.stop()
 
-# ---------------- 데이터 정리 ----------------
-df.columns = df.columns.str.lower().str.strip()
-df["country"] = df["country"].astype(str)
-df["blood_type"] = df["blood_type"].astype(str).str.upper().str.strip()
+# ----------------- 전처리 -----------------
+# 컬럼 이름 표준화
+df = df.rename(columns={c: c.strip().lower() for c in df.columns})
+required_cols = {"country", "blood_type"}
+if not required_cols.issubset(set(df.columns)):
+    st.error("CSV에 최소한 'country'와 'blood_type' 컬럼이 있어야 합니다. (대소문자 무관)")
+    st.stop()
 
-st.subheader("📄 데이터 미리보기")
-st.dataframe(df.head())
+df["country"] = df["country"].astype(str).str.strip()
+df["blood_type"] = df["blood_type"].astype(str).str.strip().str.upper()
 
-# ---------------- 국가별 혈액형 집계 ----------------
-counts = (
-    df.groupby(["country", "blood_type"])
-    .size()
-    .reset_index(name="count")
-)
+st.subheader("원본 데이터(미리보기)")
+st.dataframe(df.head(10))
 
-total = counts.groupby("country")["count"].sum().reset_index(name="total_count")
-counts = counts.merge(total, on="country")
-counts["pct"] = counts["count"] / counts["total_count"] * 100
+# ----------------- 집계 -----------------
+@st.cache_data
+def compute_counts(df):
+    counts = df.groupby(["country", "blood_type"], as_index=False).size().rename(columns={"size":"count"})
+    total = counts.groupby("country", as_index=False)["count"].sum().rename(columns={"count":"total_count"})
+    counts = counts.merge(total, on="country")
+    counts["pct"] = counts["count"] / counts["total_count"] * 100
+    # 우세 혈액형
+    idx = counts.groupby("country")["count"].idxmax()
+    dominant = counts.loc[idx].reset_index(drop=True)
+    dominant = dominant.rename(columns={
+        "blood_type":"dominant_blood_type",
+        "count":"dominant_count",
+        "pct":"dominant_pct"
+    }).sort_values("dominant_count", ascending=False).reset_index(drop=True)
+    return counts, dominant
 
-# ---------------- 우세 혈액형 계산 ----------------
-idx = counts.groupby("country")["count"].idxmax()
-dominant = counts.loc[idx].copy()
-dominant = dominant.sort_values("count", ascending=False)
-dominant = dominant.rename(columns={
-    "blood_type": "dominant_blood_type",
-    "count": "dominant_count",
-    "pct": "dominant_pct"
-})
+counts_df, dominant_df = compute_counts(df)
 
-# ---------------- 상위 N개 국가 ----------------
+# ----------------- 사이드바: 그래프 옵션 -----------------
 st.sidebar.header("그래프 옵션")
-top_n = st.sidebar.slider("표시할 국가 수", 5, 50, 15)
+top_n = st.sidebar.slider("상위 국가 수 (Top N)", min_value=3, max_value=100, value=15, step=1)
+metric = st.sidebar.selectbox("막대그래프 기준", ["dominant_count", "dominant_pct"])
+stacked_view = st.sidebar.checkbox("누적(스택) 보기: 상위 N개 국가의 모든 혈액형 비율", value=True)
 
-top_df = dominant.head(top_n)
+# ----------------- 상위 N 국가 막대그래프 (수평) -----------------
+st.subheader("📊 상위 국가 — 우세 혈액형 (수평 막대)")
 
-# ---------------- 막대그래프 ----------------
-st.subheader("📊 나라별 우세 혈액형 (막대그래프)")
-fig = px.bar(
+# 안전: metric이 문자열이라 direct column ok
+if metric == "dominant_count":
+    top_df = dominant_df.nlargest(top_n, "dominant_count").copy()
+else:
+    top_df = dominant_df.nlargest(top_n, "dominant_pct").copy()
+
+# 정렬(내림차순)
+top_df = top_df.sort_values(by=metric, ascending=True)  # for horizontal bar: small->left, big->right
+
+fig_bar = px.bar(
     top_df,
-    x="country",
-    y="dominant_count",
+    x=metric,
+    y="country",
+    orientation="h",
     color="dominant_blood_type",
-    title="상위 국가 우세 혈액형",
-    labels={"dominant_count": "우세 혈액형 수"},
+    labels={metric: ("우세 혈액형 수" if metric=="dominant_count" else "우세 혈액형 비율(%)"), "country":"국가"},
+    hover_data=["dominant_count","dominant_pct","total_count"]
 )
-fig.update_layout(xaxis_tickangle=-40)
-st.plotly_chart(fig, use_container_width=True)
+fig_bar.update_layout(yaxis=dict(tickfont=dict(size=11)))
+st.plotly_chart(fig_bar, use_container_width=True)
 
-# ---------------- 상세 국가 선택 ----------------
-st.subheader("🔍 특정 국가 혈액형 비율")
-selected_country = st.selectbox("국가 선택", sorted(df["country"].unique()))
+# ----------------- 누적 스택 막대 (모든 혈액형 비율) -----------------
+if stacked_view:
+    st.subheader(f"🔢 상위 {top_n}개 국가의 혈액형 비율 (누적 스택, %)")
+    # pivot percentages
+    pivot = counts_df.pivot_table(index="country", columns="blood_type", values="pct", fill_value=0)
+    # choose countries to show: same top countries by dominant_count to keep meaning
+    countries_for_stack = dominant_df.nlargest(top_n, "dominant_count")["country"].tolist()
+    stack_df = pivot.loc[pivot.index.intersection(countries_for_stack)].reset_index()
+    # preserve order: sort by dominant_count desc
+    order = dominant_df.nlargest(top_n, "dominant_count")["country"].tolist()
+    stack_df["country"] = pd.Categorical(stack_df["country"], categories=order, ordered=True)
+    stack_df = stack_df.sort_values("country", ascending=False)  # so top is top of page
 
-detail = counts[counts["country"] == selected_country]
+    fig_stack = px.bar(
+        stack_df,
+        x="country",
+        y=[c for c in stack_df.columns if c != "country"],
+        title="누적 비율(%)",
+        labels={"value":"비율(%)", "country":"국가"},
+    )
+    fig_stack.update_layout(xaxis_tickangle=-45)
+    st.plotly_chart(fig_stack, use_container_width=True)
 
-fig2 = px.pie(
-    detail,
-    names="blood_type",
-    values="count",
-    title=f"{selected_country}의 혈액형 비율"
-)
-st.plotly_chart(fig2, use_container_width=True)
+# ----------------- 특정 국가 상세 (파이 + 표) -----------------
+st.subheader("🔎 특정 국가의 혈액형 분포")
+countries_sorted = sorted(counts_df["country"].unique())
+selected_country = st.selectbox("국가 선택", countries_sorted, index=0)
 
-# ---------------- 결과 다운로드 ----------------
-st.subheader("⬇ 결과 다운로드")
-csv_data = dominant.to_csv(index=False).encode("utf-8")
-st.download_button(
-    "우세 혈액형 결과 CSV 다운로드",
-    csv_data,
-    "dominant_blood_types.csv",
-    "text/csv"
-)
+detail = counts_df[counts_df["country"] == selected_country].copy()
+if detail.empty:
+    st.warning("선택한 국가의 데이터가 없습니다.")
+else:
+    # 표
+    st.markdown(f"**{selected_country}**의 혈액형 분포 (카운트 및 비율)")
+    detail_table = detail[["blood_type","count","pct"]].sort_values("count", ascending=False).reset_index(drop=True)
+    detail_table["pct"] = detail_table["pct"].map(lambda x: f"{x:.1f}%")
+    st.table(detail_table)
 
-st.success("분석 완료! 필요하면 그래프 스타일도 커스터마이징해줄게 😊")
+    # 파이차트
+    fig_pie = px.pie(detail, names="blood_type", values="count", title=f"{selected_country} - 혈액형 비율 (count)")
+    st.plotly_chart(fig_pie, use_container_width=True)
+
+# ----------------- 전체 우세 혈액형 테이블 및 다운로드 -----------------
+st.subheader("📋 모든 국가의 우세 혈액형 (정렬)")
+dominant_display = dominant_df[["country","dominant_blood_type","dominant_count","dominant_pct","total_count"]].copy()
+dominant_display = dominant_display.rename(columns={
+    "dominant_blood_type":"우세 혈액형",
+    "dominant_count":"우세 혈액형 수",
+    "dominant_pct":"우세 비율(%)",
+    "total_count":"총표본수"
+})
+dominant_display["우세 비율(%)"] = dominant_display["우세 비율(%)"].map(lambda x: f"{x:.1f}%")
+st.dataframe(dominant_display.reset_index(drop=True))
+
+csv_bytes = dominant_df.to_csv(index=False).encode("utf-8")
+st.download_button("우세 혈액형 결과 다운로드 (CSV)", csv_bytes, "dominant_blood_types.csv", "text/csv")
+
+st.success("완료 — 그래프나 색상, 정렬 방식 더 바꾸고 싶으면 말해줘!")
